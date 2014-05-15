@@ -312,7 +312,18 @@ static s32 igb_init_phy_params_82575(struct e1000_hw *hw)
 		phy->type = e1000_phy_bcm54616;
 		break;
 	default:
-		ret_val = -E1000_ERR_PHY;
+		hw->phy.media_type = e1000_media_type_internal_serdes;
+		hw->mac.ops.setup_physical_interface =
+			igb_setup_serdes_link_82575;
+		phy->type = e1000_phy_none;
+		ret_val = -E1000_ERR_PHY_UNKNOWN;
+
+		/* change current link mode setting */
+		ctrl_ext &= ~E1000_CTRL_EXT_LINK_MODE_MASK;
+		ctrl_ext |= E1000_CTRL_EXT_LINK_MODE_PCIE_SERDES;
+		wr32(E1000_CTRL_EXT, ctrl_ext);
+
+		dev_info(&adapter->pdev->dev, "unknown phy, using serdes\n");
 		goto out;
 	}
 
@@ -630,13 +641,21 @@ static s32 igb_get_invariants_82575(struct e1000_hw *hw)
 	switch (link_mode) {
 	case E1000_CTRL_EXT_LINK_MODE_1000BASE_KX:
 		hw->phy.media_type = e1000_media_type_internal_serdes;
+		hw_dbg("1000BASE_KX");
 		break;
 	case E1000_CTRL_EXT_LINK_MODE_SGMII:
 		/* Get phy control interface type set (MDIO vs. I2C)*/
 		if (igb_sgmii_uses_mdio_82575(hw)) {
+			u32 mdicnfg = rd32(E1000_MDICNFG);
 			hw->phy.media_type = e1000_media_type_copper;
 			dev_spec->sgmii_active = true;
+			mdicnfg &= E1000_MDICNFG_PHY_MASK;
+			hw->phy.addr = mdicnfg >> E1000_MDICNFG_PHY_SHIFT;
+			hw_dbg("SGMII w/ external MDIO device at 0x%x\n",
+			       hw->phy.addr);
 			break;
+		} else {
+			hw_dbg("SGMII with external I2C PHY");
 		}
 		fallthrough; /* for I2C based SGMII */
 	case E1000_CTRL_EXT_LINK_MODE_PCIE_SERDES:
@@ -653,8 +672,11 @@ static s32 igb_get_invariants_82575(struct e1000_hw *hw)
 				hw->phy.media_type = e1000_media_type_copper;
 				dev_spec->sgmii_active = true;
 			}
+			hw_dbg("SERDES with external SFP");
 
 			break;
+		} else {
+			hw_dbg("SERDES");
 		}
 
 		/* change current link mode setting */

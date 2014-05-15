@@ -2641,21 +2641,6 @@ out:
 }
 
 /**
- *  igb_read_phy_reg_gs40g - Read GS40G  PHY register
- *  @hw: pointer to the HW structure
- *  @offset: lower half is register offset to read to
- *     upper half is page to use.
- *  @data: data to read at register offset
- *
- *  Acquires semaphore, if necessary, then reads the data in the PHY register
- *  at the offset.  Release any acquired semaphores before exiting.
- **/
-s32 igb_read_phy_reg_gs40g(struct e1000_hw *hw, u32 offset, u16 *data)
-{
-	return igb_read_reg_gs40g(hw, hw->phy.addr, offset, data);
-}
-
-/**
  *  igb_set_master_slave_mode - Setup PHY for Master/slave mode
  *  @hw: pointer to the HW structure
  *

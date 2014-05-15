@@ -8,6 +8,7 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/netdevice.h>
+#include <linux/phy.h>
 
 #include "e1000_regs.h"
 #include "e1000_defines.h"
@@ -529,6 +530,14 @@ struct e1000_hw {
 	struct e1000_mbx_info mbx;
 	struct e1000_host_mng_dhcp_cookie mng_cookie;
 
+#ifdef CONFIG_PHYLIB
+	/* Phylib and MDIO interface */
+	struct mii_bus *mii_bus;
+	struct phy_device *phy_dev;
+	phy_interface_t phy_interface;
+	struct device_node *phy_node;
+	bool use_mii;
+#endif
 	union {
 		struct e1000_dev_spec_82575	_82575;
 	} dev_spec;

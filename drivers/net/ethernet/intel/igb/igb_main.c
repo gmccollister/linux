@@ -22,6 +22,7 @@
 #include <linux/if.h>
 #include <linux/if_vlan.h>
 #include <linux/pci.h>
+#include <linux/phy.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/ip.h>
@@ -38,6 +39,7 @@
 #include <linux/dca.h>
 #endif
 #include <linux/i2c.h>
+#include <linux/of_mdio.h>
 #include "igb.h"
 
 enum queue_mode {
@@ -3129,6 +3131,148 @@ static s32 igb_init_i2c(struct igb_adapter *adapter)
 	return status;
 }
 
+
+#ifdef CONFIG_PHYLIB
+/*
+ * MMIO/PHYdev support
+ */
+
+static int igb_enet_mdio_read(struct mii_bus *bus, int mii_id, int regnum)
+{
+	struct e1000_hw *hw = bus->priv;
+	u16 out;
+	int err;
+
+	err = igb_read_mdio_reg_82580(hw, mii_id, regnum, &out);
+	if (err)
+		return err;
+	return out;
+}
+
+static int igb_enet_mdio_write(struct mii_bus *bus, int mii_id, int regnum,
+                               u16 val)
+{
+	struct e1000_hw *hw = bus->priv;
+
+	return igb_write_mdio_reg_82580(hw, mii_id, regnum, val);
+}
+
+static int igb_enet_mdio_reset(struct mii_bus *bus)
+{
+	udelay(300);
+	return 0;
+}
+
+static void igb_enet_mii_link(struct net_device *netdev)
+{
+}
+
+/* Probe the mdio bus for phys and connect them */
+static int igb_enet_mii_probe(struct net_device *netdev)
+{
+	struct igb_adapter *adapter = netdev_priv(netdev);
+	struct e1000_hw *hw = &adapter->hw;
+	struct phy_device *phy_dev = NULL;
+	char mdio_bus_id[MII_BUS_ID_SIZE];
+	char phy_name[MII_BUS_ID_SIZE + 3] = "";
+	int phy_id;
+
+	if (hw->phy_node) {
+		phy_dev = of_phy_connect(netdev, hw->phy_node,
+					 igb_enet_mii_link, 0,
+					 hw->phy_interface);
+	} else {
+		/* check for attached phy */
+		for (phy_id = 0; (phy_id < PHY_MAX_ADDR); phy_id++) {
+			if (!mdiobus_is_registered_device(hw->mii_bus, phy_id))
+				continue;
+			strlcpy(mdio_bus_id, hw->mii_bus->id, MII_BUS_ID_SIZE);
+			break;
+		}
+
+		if (phy_id >= PHY_MAX_ADDR) {
+			netdev_info(netdev,
+				    "no PHY, assuming direct connection to "
+				    "switch\n");
+			strlcpy(mdio_bus_id, "fixed-0", MII_BUS_ID_SIZE);
+			phy_id = 0;
+		}
+
+		hw->phy_interface = PHY_INTERFACE_MODE_RGMII;
+		snprintf(phy_name, sizeof(phy_name),
+			 PHY_ID_FMT, mdio_bus_id, phy_id);
+		phy_dev = phy_connect(netdev, phy_name,
+				      igb_enet_mii_link, hw->phy_interface);
+	}
+
+	if (IS_ERR(phy_dev)) {
+		netdev_err(netdev, "could not attach to PHY\n");
+		return PTR_ERR(phy_dev);
+	}
+
+	hw->phy_dev = phy_dev;
+	netdev_info(netdev, "igb PHY driver [%s] (mii_bus:phy_addr=%s)\n",
+		hw->phy_dev->drv->name, phy_name);
+
+	return 0;
+}
+
+/* Create and register mdio bus */
+static int igb_enet_mii_init(struct pci_dev *pdev)
+{
+	struct mii_bus *mii_bus;
+	struct net_device *netdev = pci_get_drvdata(pdev);
+	struct igb_adapter *adapter = netdev_priv(netdev);
+	struct e1000_hw *hw = &adapter->hw;
+	struct device_node *node;
+	int err;
+
+	mii_bus = mdiobus_alloc();
+	if (mii_bus == NULL) {
+		err = -ENOMEM;
+		goto err_out;
+	}
+
+	mii_bus->name = "igb_enet_mii_bus";
+	mii_bus->read = igb_enet_mdio_read;
+	mii_bus->write = igb_enet_mdio_write;
+	mii_bus->reset = igb_enet_mdio_reset;
+	snprintf(mii_bus->id, MII_BUS_ID_SIZE, "%s-%x",
+		 pci_name(pdev), hw->device_id + 1);
+	mii_bus->priv = hw;
+	mii_bus->parent = &pdev->dev;
+
+	if (dev_of_node(&pdev->dev)) {
+		node = of_get_child_by_name(pdev->dev.of_node, "mdio");
+		err = of_mdiobus_register(mii_bus, node);
+		of_node_put(node);
+	} else {
+		err = mdiobus_register(mii_bus);
+	}
+
+	if (err) {
+		printk(KERN_ERR "failed to register mii_bus: %d\n", err);
+		goto err_out_free_mdiobus;
+	}
+	hw->mii_bus = mii_bus;
+
+	return 0;
+
+err_out_free_mdiobus:
+	mdiobus_free(mii_bus);
+err_out:
+	return err;
+}
+
+static void igb_enet_mii_remove(struct e1000_hw *hw)
+{
+	if (hw->mii_bus) {
+		mdiobus_unregister(hw->mii_bus);
+		mdiobus_free(hw->mii_bus);
+	}
+}
+#endif /* CONFIG_PHYLIB */
+
 /**
  *  igb_probe - Device Initialization Routine
  *  @pdev: PCI device information struct
@@ -3151,6 +3295,7 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	const struct e1000_info *ei = igb_info_tbl[ent->driver_data];
 	int err, pci_using_dac;
 	u8 part_str[E1000_PBANUM_LENGTH];
+	struct device_node *phy_node;
 
 	/* Catch broken hardware that put the wrong VF device ID in
 	 * the PCIe SR-IOV capability.
@@ -3232,8 +3377,24 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	memcpy(&hw->nvm.ops, ei->nvm_ops, sizeof(hw->nvm.ops));
 	/* Initialize skew-specific constants */
 	err = ei->get_invariants(hw);
-	if (err)
+	if (err == -E1000_ERR_PHY_UNKNOWN)
+		hw->use_mii = true;
+	else if (err)
 		goto err_sw_init;
+	else
+		hw->use_mii = false;
+
+	phy_node = of_parse_phandle(pdev->dev.of_node, "phy-handle", 0);
+	if (!phy_node && of_phy_is_fixed_link(pdev->dev.of_node)) {
+		err = of_phy_register_fixed_link(pdev->dev.of_node);
+		if (err < 0) {
+			dev_err(&pdev->dev,
+				"broken fixed-link specification\n");
+			goto err_sw_init;
+		}
+		phy_node = of_node_get(pdev->dev.of_node);
+	}
+	hw->phy_node = phy_node;
 
 	/* setup the private structure */
 	err = igb_sw_init(adapter);
@@ -3593,6 +3754,13 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	dev_pm_set_driver_flags(&pdev->dev, DPM_FLAG_NO_DIRECT_COMPLETE);
 
 	pm_runtime_put_noidle(&pdev->dev);
+
+#ifdef CONFIG_PHYLIB
+	/* create and register the mdio bus if using ext phy */
+	if (hw->use_mii)
+		igb_enet_mii_init(pdev);
+#endif
+
 	return 0;
 
 err_register:
@@ -3604,6 +3772,8 @@ err_eeprom:
 
 	if (hw->flash_address)
 		iounmap(hw->flash_address);
+
+	of_node_put(phy_node);
 err_sw_init:
 	kfree(adapter->mac_table);
 	kfree(adapter->shadow_vfta);
@@ -3775,6 +3945,10 @@ static void igb_remove(struct pci_dev *pdev)
 	struct e1000_hw *hw = &adapter->hw;
 
 	pm_runtime_get_noresume(&pdev->dev);
+#ifdef CONFIG_PHYLIB
+	if (rd32(E1000_MDICNFG) & E1000_MDICNFG_EXT_MDIO)
+		igb_enet_mii_remove(hw);
+#endif
 #ifdef CONFIG_IGB_HWMON
 	igb_sysfs_exit(adapter);
 #endif
@@ -4109,6 +4283,15 @@ static int __igb_open(struct net_device *netdev, bool resuming)
 
 	if (!resuming)
 		pm_runtime_put(&pdev->dev);
+
+#ifdef CONFIG_PHYLIB
+	/* Probe and connect to PHY if using ext phy */
+	/* FIXME - not needed for our use case and causes crash when restarting
+	 * interface.
+	 * if (hw->use_mii)
+		igb_enet_mii_probe(netdev);
+	*/
+#endif
 
 	/* start the watchdog. */
 	hw->mac.get_link_status = 1;
@@ -8919,21 +9102,41 @@ void igb_alloc_rx_buffers(struct igb_ring *rx_ring, u16 cleaned_count)
 static int igb_mii_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 {
 	struct igb_adapter *adapter = netdev_priv(netdev);
+	struct e1000_hw *hw = &adapter->hw;
 	struct mii_ioctl_data *data = if_mii(ifr);
 
-	if (adapter->hw.phy.media_type != e1000_media_type_copper)
+	if (adapter->hw.phy.media_type != e1000_media_type_copper &&
+	    !(rd32(E1000_MDICNFG) & E1000_MDICNFG_EXT_MDIO))
 		return -EOPNOTSUPP;
 
 	switch (cmd) {
 	case SIOCGMIIPHY:
-		data->phy_id = adapter->hw.phy.addr;
+		data->phy_id = hw->phy.addr;
 		break;
 	case SIOCGMIIREG:
-		if (igb_read_phy_reg(&adapter->hw, data->reg_num & 0x1F,
-				     &data->val_out))
-			return -EIO;
+		if (hw->mac.type == e1000_i210 || hw->mac.type == e1000_i211) {
+			if (igb_read_mdio_reg_82580(&adapter->hw, data->phy_id,
+						    data->reg_num & 0x1F,
+						    &data->val_out))
+				return -EIO;
+		} else {
+			if (igb_read_phy_reg(&adapter->hw, data->reg_num & 0x1F,
+			                     &data->val_out))
+				return -EIO;
+		}
 		break;
 	case SIOCSMIIREG:
+		if (hw->mac.type == e1000_i210 || hw->mac.type == e1000_i211) {
+			if (igb_write_mdio_reg_82580(hw, data->phy_id,
+						     data->reg_num & 0x1F,
+						     data->val_in))
+				return -EIO;
+		} else {
+			if (igb_write_phy_reg(hw, data->reg_num & 0x1F,
+					      data->val_in))
+				return -EIO;
+		}
+		break;
 	default:
 		return -EOPNOTSUPP;
 	}
