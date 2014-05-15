@@ -2170,7 +2170,7 @@ s32 igb_read_phy_reg_82580(struct e1000_hw *hw, u32 offset, u16 *data)
 	if (ret_val)
 		goto out;
 
-	ret_val = igb_read_phy_reg_mdic(hw, offset, data);
+	ret_val = igb_read_phy_reg_mdic(hw, hw->phy.addr, offset, data);
 
 	hw->phy.ops.release(hw);
 
@@ -2195,7 +2195,60 @@ s32 igb_write_phy_reg_82580(struct e1000_hw *hw, u32 offset, u16 data)
 	if (ret_val)
 		goto out;
 
-	ret_val = igb_write_phy_reg_mdic(hw, offset, data);
+	ret_val = igb_write_phy_reg_mdic(hw, hw->phy.addr, offset, data);
+
+	hw->phy.ops.release(hw);
+
+out:
+	return ret_val;
+}
+
+/**
+ *  igb_read_mdio_reg_82580 - Read 82580 MDI control register
+ *  @hw: pointer to the HW structure
+ *  @addr: MDIO address
+ *  @offset: register offset to be read
+ *  @data: pointer to the read data
+ *
+ *  Reads the MDI control register at offset and stores the
+ *  information read to data.
+ **/
+s32 igb_read_mdio_reg_82580(struct e1000_hw *hw, u8 addr, u32 offset,
+			    u16 *data)
+{
+	s32 ret_val;
+
+	ret_val = hw->phy.ops.acquire(hw);
+	if (ret_val)
+		goto out;
+
+	ret_val = igb_read_phy_reg_mdic(hw, addr, offset, data);
+
+	hw->phy.ops.release(hw);
+
+out:
+	return ret_val;
+}
+
+/**
+ *  igb_write_mdio_reg_82580 - Write 82580 MDI control register
+ *  @hw: pointer to the HW structure
+ *  @addr: MDIO address
+ *  @offset: register offset to write to
+ *  @data: data to write to register at offset
+ *
+ *  Writes data to MDI control register at offset.
+ **/
+s32 igb_write_mdio_reg_82580(struct e1000_hw *hw, u8 addr, u32 offset,
+			     u16 data)
+{
+	s32 ret_val;
+
+	ret_val = hw->phy.ops.acquire(hw);
+	if (ret_val)
+		goto out;
+
+	ret_val = igb_write_phy_reg_mdic(hw, addr, offset, data);
 
 	hw->phy.ops.release(hw);
 
