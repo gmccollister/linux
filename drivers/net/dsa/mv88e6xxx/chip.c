@@ -657,7 +657,7 @@ static void mv88e6xxx_validate(struct dsa_switch *ds, int port,
 	/* We can only operate at 2500BaseX or 1000BaseX.  If requested
 	 * to advertise both, only report advertising at 2500BaseX.
 	 */
-	phylink_helper_basex_speed(state);
+	//phylink_helper_basex_speed(state);
 }
 
 static void mv88e6xxx_mac_config(struct dsa_switch *ds, int port,
